@@ -66,6 +66,8 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates/emptycandidates"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates/previouscandidates"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates/prioritysorting"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/scaledowncandidates/utilizationsorting"
 	provreqorchestrator "k8s.io/autoscaler/cluster-autoscaler/provisioningrequest/orchestrator"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
@@ -502,6 +504,7 @@ func buildAutoscaler(debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter
 		DrainabilityRules:    drainabilityRules,
 		ScaleUpOrchestrator:  orchestrator.New(),
 	}
+	opts.CloudProvider = cloudBuilder.NewCloudProvider(opts.AutoscalingOptions, informerFactory)
 
 	opts.Processors = ca_processors.DefaultProcessors(autoscalingOptions)
 	opts.Processors.TemplateNodeInfoProvider = nodeinfosprovider.NewDefaultTemplateNodeInfoProvider(nodeInfoCacheExpireTime, *forceDaemonSets)
@@ -551,10 +554,26 @@ func buildAutoscaler(debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter
 	opts.Processors.PodListProcessor = podListProcessor
 	scaleDownCandidatesComparers := []scaledowncandidates.CandidatesComparer{}
 	if autoscalingOptions.ParallelDrain {
+		kubeEventRecorder := kube_util.CreateEventRecorder(kubeClient, autoscalingOptions.RecordDuplicatedEvents)
 		sdCandidatesSorting := previouscandidates.NewPreviousCandidates()
+		stopChannel := make(chan struct{})
+		priorityConfigMapLister := kube_util.NewConfigMapListerForNamespace(kubeClient, stopChannel, opts.ConfigNamespace)
+		prioritySorting := prioritysorting.NewPrioritySortingProcessor(
+			opts.CloudProvider,
+			priorityConfigMapLister.ConfigMaps(opts.ConfigNamespace),
+			kubeEventRecorder,
+		)
+		utilizationSorting := utilizationsorting.NewUtilizationSortingProcessor(
+			emptycandidates.NewNodeInfoGetter(opts.ClusterSnapshot),
+			opts.CloudProvider,
+			opts.Processors.NodeGroupConfigProcessor,
+			opts.IgnoreMirrorPodsUtilization,
+		)
 		scaleDownCandidatesComparers = []scaledowncandidates.CandidatesComparer{
 			emptycandidates.NewEmptySortingProcessor(emptycandidates.NewNodeInfoGetter(opts.ClusterSnapshot), deleteOptions, drainabilityRules),
 			sdCandidatesSorting,
+			prioritySorting,
+			utilizationSorting,
 		}
 		opts.Processors.ScaleDownCandidatesNotifier.Register(sdCandidatesSorting)
 	}
