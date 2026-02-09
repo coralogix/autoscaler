@@ -42,6 +42,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	pod_util "k8s.io/autoscaler/cluster-autoscaler/utils/pod"
 	klog "k8s.io/klog/v2"
+	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 type eligibilityChecker interface {
@@ -77,6 +78,8 @@ type Planner struct {
 	resourceLimitsFinder  *resource.LimitsFinder
 	cc                    controllerReplicasCalculator
 	scaleDownSetProcessor nodes.ScaleDownSetProcessor
+	deleteOptions         options.NodeDeleteOptions
+	drainabilityRules     rules.Rules
 }
 
 // New creates a new Planner object.
@@ -98,6 +101,8 @@ func New(context *context.AutoscalingContext, processors *processors.Autoscaling
 		cc:                    newControllerReplicasCalculator(context.ListerRegistry),
 		scaleDownSetProcessor: processors.ScaleDownSetProcessor,
 		minUpdateInterval:     minUpdateInterval,
+		deleteOptions:         deleteOptions,
+		drainabilityRules:     drainabilityRules,
 	}
 }
 
@@ -256,6 +261,32 @@ func (p *Planner) injectPods(pods []*apiv1.Pod) error {
 	return nil
 }
 
+func (p *Planner) isNodeEmpty(nodeInfo *schedulerframework.NodeInfo) bool {
+	podsToRemove, _, _, err := simulator.GetPodsToMove(nodeInfo, p.deleteOptions, p.drainabilityRules, nil, nil, p.latestUpdate)
+	if err != nil {
+		return false
+	}
+	return len(podsToRemove) == 0
+}
+
+func (p *Planner) nonEmptyBinPackingDestinations(podDestinations map[string]bool) map[string]bool {
+	destinations := make(map[string]bool)
+	for nodeName := range podDestinations {
+		nodeInfo, err := p.context.ClusterSnapshot.NodeInfos().Get(nodeName)
+		if err != nil {
+			continue
+		}
+		if !scaledown.IsBinPacking(nodeInfo.Node()) {
+			continue
+		}
+		if p.isNodeEmpty(nodeInfo) {
+			continue
+		}
+		destinations[nodeName] = true
+	}
+	return destinations
+}
+
 // categorizeNodes determines, for each node, whether it can be eventually
 // removed or if there are reasons preventing that.
 func (p *Planner) categorizeNodes(podDestinations map[string]bool, scaleDownCandidates []*apiv1.Node) {
@@ -280,7 +311,28 @@ func (p *Planner) categorizeNodes(podDestinations map[string]bool, scaleDownCand
 			klog.V(4).Infof("%d out of %d nodes skipped in scale down simulation: there are already %d unneeded nodes so no point in looking for more. Total atomic scale down nodes: %d", len(currentlyUnneededNodeNames)-i, len(currentlyUnneededNodeNames), len(removableList), atomicScaleDownNodesCount)
 			break
 		}
-		removable, unremovable := p.rs.SimulateNodeRemoval(node, podDestinations, p.latestUpdate, p.context.RemainingPdbTracker)
+		nodeInfo, err := p.context.ClusterSnapshot.NodeInfos().Get(node)
+		isBinPacking := false
+		if err == nil {
+			isBinPacking = scaledown.IsBinPacking(nodeInfo.Node())
+			if isBinPacking {
+				klog.V(2).Infof("Bin-packing node %s: applying bin-packing logic", nodeInfo.Node().Name)
+				if p.isNodeEmpty(nodeInfo) {
+					unremovableCount++
+					p.unremovableNodes.AddTimeout(
+						&simulator.UnremovableNode{Node: nodeInfo.Node(), Reason: simulator.BinPackingEmptyNode},
+						unremovableTimeout)
+					continue
+				}
+			}
+		} else {
+			klog.V(4).Infof("Unable to check reserved annotation for node %s: %v", node, err)
+		}
+		destinations := podDestinations
+		if isBinPacking {
+			destinations = p.nonEmptyBinPackingDestinations(podDestinations)
+		}
+		removable, unremovable := p.rs.SimulateNodeRemoval(node, destinations, p.latestUpdate, p.context.RemainingPdbTracker)
 		if removable != nil {
 			_, inParallel, _ := p.context.RemainingPdbTracker.CanRemovePods(removable.PodsToReschedule)
 			if !inParallel {

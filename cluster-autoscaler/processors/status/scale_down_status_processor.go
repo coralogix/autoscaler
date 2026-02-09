@@ -27,7 +27,7 @@ type ScaleDownStatusProcessor interface {
 	CleanUp()
 }
 
-// NewDefaultScaleDownStatusProcessor creates a default instance of ScaleUpStatusProcessor.
+// NewDefaultScaleDownStatusProcessor creates a default instance of ScaleDownStatusProcessor.
 func NewDefaultScaleDownStatusProcessor() ScaleDownStatusProcessor {
 	return &NoOpScaleDownStatusProcessor{}
 }

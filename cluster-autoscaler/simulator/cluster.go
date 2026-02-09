@@ -83,6 +83,8 @@ const (
 	NotUnneededOtherReason
 	// RecentlyUnremovable - node can't be removed because it was recently found to be unremovable.
 	RecentlyUnremovable
+	// BinPackingEmptyNode - node can't be removed because it is an empty bin-packing node.
+	BinPackingEmptyNode
 	// NoPlaceToMovePods - node can't be removed because there's no place to move its pods to.
 	NoPlaceToMovePods
 	// BlockedByPod - node can't be removed because a pod running on it can't be moved. The reason why should be in BlockingPod.

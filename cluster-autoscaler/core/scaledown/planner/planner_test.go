@@ -30,6 +30,7 @@ import (
 	testprovider "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/test"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/context"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/deletiontracker"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/pdb"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/status"
@@ -520,6 +521,88 @@ func TestUpdateClusterState(t *testing.T) {
 	}
 }
 
+func TestUpdateClusterStateBinPackingEmptyNodeUnremovable(t *testing.T) {
+	nodes := []*apiv1.Node{
+		binPackingNode("bp1", 1000, 10),
+	}
+	rsLister, err := kube_util.NewTestReplicaSetLister(generateReplicaSets("rs", 1))
+	assert.NoError(t, err)
+	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, rsLister, nil)
+	provider := testprovider.NewTestCloudProvider(nil, nil)
+	provider.AddNodeGroup("ng1", 0, 0, 0)
+	for _, node := range nodes {
+		provider.AddNode("ng1", node)
+	}
+	context, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{
+		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+			ScaleDownUnneededTime: 10 * time.Minute,
+		},
+		ScaleDownSimulationTimeout: 1 * time.Second,
+		MaxScaleDownParallelism:    10,
+	}, &fake.Clientset{}, registry, provider, nil, nil)
+	assert.NoError(t, err)
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, context.ClusterSnapshot, nodes, nil)
+	deleteOptions := options.NodeDeleteOptions{}
+	p := New(&context, NewTestProcessors(&context), deleteOptions, nil)
+	p.eligibilityChecker = &fakeEligibilityChecker{eligible: asMap(nodeNames(nodes))}
+
+	assert.NoError(t, p.UpdateClusterState(nodes, nodes, &fakeActuationStatus{}, time.Now()))
+
+	found := false
+	for _, unremovableNode := range p.unremovableNodes.AsList() {
+		if unremovableNode.Node.Name == "bp1" {
+			found = true
+			assert.Equal(t, simulator.BinPackingEmptyNode, unremovableNode.Reason)
+		}
+	}
+	assert.True(t, found, "expected empty bin-packing node to be unremovable")
+}
+
+func TestBinPackingDestinationsFilteredToNonEmptyBinPackingNodes(t *testing.T) {
+	nodes := []*apiv1.Node{
+		binPackingNode("bp-source", 2000, 10),
+		binPackingNode("bp-dest-nonempty", 2000, 10),
+		binPackingNode("bp-dest-empty", 2000, 10),
+		BuildTestNode("n1", 2000, 10),
+	}
+	pods := []*apiv1.Pod{
+		SetRSPodSpec(BuildScheduledTestPod("p1", 500, 1, "bp-source"), "rs"),
+		SetRSPodSpec(BuildScheduledTestPod("p2", 500, 1, "bp-dest-nonempty"), "rs"),
+	}
+	rsLister, err := kube_util.NewTestReplicaSetLister(generateReplicaSets("rs", 2))
+	assert.NoError(t, err)
+	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, rsLister, nil)
+	provider := testprovider.NewTestCloudProvider(nil, nil)
+	provider.AddNodeGroup("ng1", 0, 0, 0)
+	for _, node := range nodes {
+		provider.AddNode("ng1", node)
+	}
+	context, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{
+		NodeGroupDefaults: config.NodeGroupAutoscalingOptions{
+			ScaleDownUnneededTime: 10 * time.Minute,
+		},
+		ScaleDownSimulationTimeout: 1 * time.Second,
+		MaxScaleDownParallelism:    10,
+	}, &fake.Clientset{}, registry, provider, nil, nil)
+	assert.NoError(t, err)
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, context.ClusterSnapshot, nodes, pods)
+	deleteOptions := options.NodeDeleteOptions{}
+	p := New(&context, NewTestProcessors(&context), deleteOptions, nil)
+	p.eligibilityChecker = &fakeEligibilityChecker{eligible: asMap([]string{"bp-source"})}
+	recorder := &recordingRemovalSimulator{
+		t:    t,
+		nodes: nodesByName(nodes),
+		expectedDestinations: map[string]bool{
+			"bp-source":         true,
+			"bp-dest-nonempty":  true,
+		},
+	}
+	p.rs = recorder
+
+	assert.NoError(t, p.UpdateClusterState(nodes, nodes, &fakeActuationStatus{}, time.Now()))
+	assert.Equal(t, 1, recorder.callCount)
+}
+
 func TestUpdateClusterStatUnneededNodesLimit(t *testing.T) {
 	testCases := []struct {
 		name               string
@@ -938,6 +1021,23 @@ func nodeUndergoingDeletion(name string, cpu, memory int64) *apiv1.Node {
 	return n
 }
 
+func binPackingNode(name string, cpu, memory int64) *apiv1.Node {
+	node := BuildTestNode(name, cpu, memory)
+	if node.Labels == nil {
+		node.Labels = map[string]string{}
+	}
+	node.Labels[scaledown.BinPackingLabelKey] = "true"
+	return node
+}
+
+func nodesByName(nodes []*apiv1.Node) map[string]*apiv1.Node {
+	m := make(map[string]*apiv1.Node, len(nodes))
+	for _, node := range nodes {
+		m[node.Name] = node
+	}
+	return m
+}
+
 type fakeActuationStatus struct {
 	recentEvictions []*apiv1.Pod
 }
@@ -991,5 +1091,22 @@ func (r *fakeRemovalSimulator) SimulateNodeRemoval(name string, _ map[string]boo
 			node = n
 		}
 	}
+	return &simulator.NodeToBeRemoved{Node: node}, nil
+}
+
+type recordingRemovalSimulator struct {
+	t                    *testing.T
+	nodes                map[string]*apiv1.Node
+	expectedDestinations map[string]bool
+	callCount            int
+}
+
+func (r *recordingRemovalSimulator) DropOldHints() {}
+
+func (r *recordingRemovalSimulator) SimulateNodeRemoval(name string, destinations map[string]bool, _ time.Time, _ pdb.RemainingPdbTracker) (*simulator.NodeToBeRemoved, *simulator.UnremovableNode) {
+	r.callCount++
+	assert.Equal(r.t, r.expectedDestinations, destinations)
+	node := r.nodes[name]
+	assert.NotNil(r.t, node)
 	return &simulator.NodeToBeRemoved{Node: node}, nil
 }

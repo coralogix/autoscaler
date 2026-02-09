@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	testprovider "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/test"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/deletiontracker"
 	. "k8s.io/autoscaler/cluster-autoscaler/core/test"
 	"k8s.io/autoscaler/cluster-autoscaler/observers/nodegroupchange"
@@ -227,6 +228,76 @@ func TestRemove(t *testing.T) {
 			}
 			if len(d.drainedNodeDeletions) > 0 {
 				t.Errorf(" Drained node map is not empty, got: %v", len(d.drainedNodeDeletions))
+			}
+		})
+	}
+}
+
+func TestDeleteNodesFromCloudProviderBinPacking(t *testing.T) {
+	testCases := []struct {
+		name              string
+		targetSize        int
+		deleteCount       int
+		binPackingCount   int
+		expectedSize      int
+	}{
+		{
+			name:              "All deletions are bin-packing",
+			targetSize:        5,
+			deleteCount:       2,
+			binPackingCount:   2,
+			expectedSize:      5,
+		},
+		{
+			name:              "Mixed bin-packing and regular deletions",
+			targetSize:        5,
+			deleteCount:       3,
+			binPackingCount:   2,
+			expectedSize:      4,
+		},
+	}
+
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			provider := testprovider.NewTestCloudProvider(
+				func(string, int) error { return nil },
+				func(string, string) error { return nil },
+			)
+			ctx, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{}, nil, nil, provider, nil, nil)
+			if err != nil {
+				t.Fatalf("Couldn't set up autoscaling context: %v", err)
+			}
+
+			scaleStateNotifier := nodegroupchange.NewNodeGroupChangeObserversList()
+
+			ng := "ng"
+			provider.AddNodeGroup(ng, 1, 10, test.targetSize)
+			nodeGroup := provider.GetNodeGroup(ng)
+
+			allNodes := generateNodes(0, test.targetSize, ng)
+			for _, node := range allNodes {
+				provider.AddNode(ng, node)
+			}
+
+			nodesToDelete := allNodes[:test.deleteCount]
+			for i := 0; i < test.binPackingCount; i++ {
+				if nodesToDelete[i].Labels == nil {
+					nodesToDelete[i].Labels = map[string]string{}
+				}
+				nodesToDelete[i].Labels[scaledown.BinPackingLabelKey] = "true"
+			}
+
+			_, err = deleteNodesFromCloudProvider(&ctx, scaleStateNotifier, nodesToDelete)
+			if err != nil {
+				t.Fatalf("deleteNodesFromCloudProvider returned error: %v", err)
+			}
+
+			size, err := nodeGroup.TargetSize()
+			if err != nil {
+				t.Fatalf("failed to read target size: %v", err)
+			}
+			if size != test.expectedSize {
+				t.Errorf("unexpected target size: got %d, want %d", size, test.expectedSize)
 			}
 		})
 	}

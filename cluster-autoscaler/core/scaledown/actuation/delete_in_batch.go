@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/deletiontracker"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/status"
 	"k8s.io/autoscaler/cluster-autoscaler/metrics"
@@ -154,11 +155,25 @@ func deleteNodesFromCloudProvider(ctx *context.AutoscalingContext, scaleStateNot
 	if nodeGroup == nil || reflect.ValueOf(nodeGroup).IsNil() {
 		return nil, errors.NewAutoscalerError(errors.InternalError, "picked node that doesn't belong to a node group: %s", nodes[0].Name)
 	}
+	binPackingCount := 0
+	for _, node := range nodes {
+		if scaledown.IsBinPacking(node) {
+			binPackingCount++
+		}
+	}
 	if err := nodeGroup.DeleteNodes(nodes); err != nil {
 		scaleStateNotifier.RegisterFailedScaleDown(nodeGroup,
 			string(errors.CloudProviderError),
 			time.Now())
 		return nodeGroup, errors.NewAutoscalerError(errors.CloudProviderError, "failed to delete nodes from group %s: %v", nodeGroup.Id(), err)
+	}
+	if binPackingCount > 0 {
+		if err := nodeGroup.IncreaseSize(binPackingCount); err != nil {
+			scaleStateNotifier.RegisterFailedScaleDown(nodeGroup,
+				string(errors.CloudProviderError),
+				time.Now())
+			return nodeGroup, errors.NewAutoscalerError(errors.CloudProviderError, "failed to restore desired size for group %s after bin-packing: %v", nodeGroup.Id(), err)
+		}
 	}
 	return nodeGroup, nil
 }
