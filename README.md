@@ -1,3 +1,17 @@
+# Coralogix Fork of Kubernetes Autoscaler
+
+We forked Kubernetes Autoscaler in order to solve issues with fragmentation of free resources in on our reserved capacity nodes. We used to have draining disabled for those nodes, which meant there was no mechanism that would move pods from underutilised nodes. This then made it impossible to move node-sized pods from spots to reserved. We introduced the following changes to address this:
+
+- Bin-packing without reducing a node group's desired size.
+  - nodes labeled `cluster-autoscaler.kubernetes.io/bin-packing-only=true` are treated as bin-packing nodes (we put that label on nodes in reserved-only node groups).
+  - nodes labeled `cluster-autoscaler.kubernetes.io/bin-packing-only=when-on-demand` are treated as bin-packing nodes unless they have a `node-role.kubernetes.io/spot-worker=true` label. (we put that label on all nodes in node groups containing a mix of reserved and spots)
+  - During scale-down planning we avoid removing empty bin-packing nodes (they are marked unremovable with reason `BinPackingEmptyNode`).
+  - When simulating node removals, we only allow pods from a bin-packing source node to move onto non-empty bin-packing destinations (so that it improves bin-packing, but never moves pods into spots).
+  - When deleting bin-packing nodes, the autoscaler immediately restores the node group's target size by calling `IncreaseSize` for the number of bin-packing deletions.
+- Priority-aware scale-down candidate ordering.
+  - Candidates are additionally sorted using the priority expander config (`ConfigMap` `cluster-autoscaler-priority-expander`, key `priorities`). Nodes with lowest priority are preferred for scaledown.
+  - Within the same priority, lower utilization nodes are preferred first.
+
 # Kubernetes Autoscaler
 
 [![Release Charts](https://github.com/kubernetes/autoscaler/actions/workflows/release.yaml/badge.svg)](https://github.com/kubernetes/autoscaler/actions/workflows/release.yaml) [![Tests](https://github.com/kubernetes/autoscaler/actions/workflows/ci.yaml/badge.svg)](https://github.com/kubernetes/autoscaler/actions/workflows/ci.yaml) [![GoDoc Widget]][GoDoc]
