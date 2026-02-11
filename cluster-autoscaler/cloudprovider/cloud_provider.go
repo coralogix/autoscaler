@@ -250,6 +250,16 @@ type NodeGroup interface {
 	GetOptions(defaults config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error)
 }
 
+// NodeGroupBinPackingDeleteExtension is an optional node group capability used by
+// scale-down bin-packing logic. Implementations delete the provided nodes without
+// decrementing node group desired/target size.
+//
+// If bin-packing nodes are selected for deletion and this extension is not
+// implemented by the node group, scale-down actuation will fail fast.
+type NodeGroupBinPackingDeleteExtension interface {
+	DeleteNodesWithoutDecrement([]*apiv1.Node) error
+}
+
 // Instance represents a cloud-provider node. The node does not necessarily map to k8s node
 // i.e it does not have to be registered in k8s cluster despite being returned by NodeGroup.Nodes()
 // method. Also it is sane to have Instance object for nodes which are being created or deleted.

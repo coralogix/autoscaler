@@ -7,7 +7,7 @@ We forked Kubernetes Autoscaler in order to solve issues with fragmentation of f
   - nodes labeled `cluster-autoscaler.kubernetes.io/bin-packing-only=when-on-demand` are treated as bin-packing nodes unless they have a `node-role.kubernetes.io/spot-worker=true` label. (we put that label on all nodes in node groups containing a mix of reserved and spots)
   - During scale-down planning we avoid removing empty bin-packing nodes (they are marked unremovable with reason `BinPackingEmptyNode`).
   - When simulating node removals, we only allow pods from a bin-packing source node to move onto non-empty bin-packing destinations (so that it improves bin-packing, but never moves pods into spots).
-  - When deleting bin-packing nodes, the autoscaler immediately restores the node group's target size by calling `IncreaseSize` for the number of bin-packing deletions.
+  - When deleting bin-packing nodes on AWS, the autoscaler terminates instances without decrementing desired capacity instead of restoring target size via `IncreaseSize`.
 - Priority-aware scale-down candidate ordering.
   - Candidates are additionally sorted using the priority expander config (`ConfigMap` `cluster-autoscaler-priority-expander`, key `priorities`). Nodes with lowest priority are preferred for scaledown.
   - Within the same priority, lower utilization nodes are preferred first.

@@ -331,22 +331,40 @@ func (ng *AwsNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 	if int(size) <= ng.MinSize() {
 		return fmt.Errorf("min size reached, nodes will not be deleted")
 	}
+	refs, err := ng.refsFromNodes(nodes)
+	if err != nil {
+		return err
+	}
+	return ng.awsManager.DeleteInstancesWithDecrement(refs, true)
+}
+
+// DeleteNodesWithoutDecrement deletes nodes from the group while preserving
+// desired capacity (used by bin-packing deletions).
+func (ng *AwsNodeGroup) DeleteNodesWithoutDecrement(nodes []*apiv1.Node) error {
+	refs, err := ng.refsFromNodes(nodes)
+	if err != nil {
+		return err
+	}
+	return ng.awsManager.DeleteInstancesWithDecrement(refs, false)
+}
+
+func (ng *AwsNodeGroup) refsFromNodes(nodes []*apiv1.Node) ([]*AwsInstanceRef, error) {
 	refs := make([]*AwsInstanceRef, 0, len(nodes))
 	for _, node := range nodes {
 		belongs, err := ng.Belongs(node)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if !belongs {
-			return fmt.Errorf("%s belongs to a different asg than %s", node.Name, ng.Id())
+			return nil, fmt.Errorf("%s belongs to a different asg than %s", node.Name, ng.Id())
 		}
 		awsref, err := AwsRefFromProviderId(node.Spec.ProviderID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		refs = append(refs, awsref)
 	}
-	return ng.awsManager.DeleteInstances(refs)
+	return refs, nil
 }
 
 // ForceDeleteNodes deletes nodes from the group regardless of constraints.

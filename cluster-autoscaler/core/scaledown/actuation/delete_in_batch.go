@@ -155,24 +155,38 @@ func deleteNodesFromCloudProvider(ctx *context.AutoscalingContext, scaleStateNot
 	if nodeGroup == nil || reflect.ValueOf(nodeGroup).IsNil() {
 		return nil, errors.NewAutoscalerError(errors.InternalError, "picked node that doesn't belong to a node group: %s", nodes[0].Name)
 	}
-	binPackingCount := 0
+	var binPackingNodes []*apiv1.Node
+	var regularNodes []*apiv1.Node
 	for _, node := range nodes {
 		if scaledown.IsBinPacking(node) {
-			binPackingCount++
+			binPackingNodes = append(binPackingNodes, node)
+			continue
 		}
+		regularNodes = append(regularNodes, node)
 	}
-	if err := nodeGroup.DeleteNodes(nodes); err != nil {
-		scaleStateNotifier.RegisterFailedScaleDown(nodeGroup,
-			string(errors.CloudProviderError),
-			time.Now())
-		return nodeGroup, errors.NewAutoscalerError(errors.CloudProviderError, "failed to delete nodes from group %s: %v", nodeGroup.Id(), err)
-	}
-	if binPackingCount > 0 {
-		if err := nodeGroup.IncreaseSize(binPackingCount); err != nil {
+
+	if len(regularNodes) > 0 {
+		if err := nodeGroup.DeleteNodes(regularNodes); err != nil {
 			scaleStateNotifier.RegisterFailedScaleDown(nodeGroup,
 				string(errors.CloudProviderError),
 				time.Now())
-			return nodeGroup, errors.NewAutoscalerError(errors.CloudProviderError, "failed to restore desired size for group %s after bin-packing: %v", nodeGroup.Id(), err)
+			return nodeGroup, errors.NewAutoscalerError(errors.CloudProviderError, "failed to delete regular nodes from group %s: %v", nodeGroup.Id(), err)
+		}
+	}
+
+	if len(binPackingNodes) > 0 {
+		extension, ok := nodeGroup.(cloudprovider.NodeGroupBinPackingDeleteExtension)
+		if !ok {
+			scaleStateNotifier.RegisterFailedScaleDown(nodeGroup,
+				string(errors.CloudProviderError),
+				time.Now())
+			return nodeGroup, errors.NewAutoscalerError(errors.CloudProviderError, "node group %s does not implement bin-packing delete without decrement", nodeGroup.Id())
+		}
+		if err := extension.DeleteNodesWithoutDecrement(binPackingNodes); err != nil {
+			scaleStateNotifier.RegisterFailedScaleDown(nodeGroup,
+				string(errors.CloudProviderError),
+				time.Now())
+			return nodeGroup, errors.NewAutoscalerError(errors.CloudProviderError, "failed to delete bin-packing nodes from group %s without decrement: %v", nodeGroup.Id(), err)
 		}
 	}
 	return nodeGroup, nil

@@ -158,7 +158,13 @@ func (m *AwsManager) SetAsgSize(asg *asg, size int) error {
 
 // DeleteInstances deletes the given instances. All instances must be controlled by the same ASG.
 func (m *AwsManager) DeleteInstances(instances []*AwsInstanceRef) error {
-	if err := m.asgCache.DeleteInstances(instances); err != nil {
+	return m.DeleteInstancesWithDecrement(instances, true)
+}
+
+// DeleteInstancesWithDecrement deletes the given instances and controls whether
+// desired capacity should be decremented for each termination call.
+func (m *AwsManager) DeleteInstancesWithDecrement(instances []*AwsInstanceRef, shouldDecrementDesiredCapacity bool) error {
+	if err := m.asgCache.DeleteInstances(instances, shouldDecrementDesiredCapacity); err != nil {
 		return err
 	}
 	klog.V(2).Infof("DeleteInstances was called: scheduling an ASG list refresh for next main loop evaluation")

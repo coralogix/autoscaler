@@ -23,6 +23,7 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	testprovider "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/test"
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown"
@@ -32,7 +33,50 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
+	schedulerframework "k8s.io/kubernetes/pkg/scheduler/framework"
 )
+
+type unsupportedBinPackingNodeGroup struct {
+	id         string
+	targetSize int
+}
+
+func (n *unsupportedBinPackingNodeGroup) MaxSize() int { return 100 }
+func (n *unsupportedBinPackingNodeGroup) MinSize() int { return 0 }
+func (n *unsupportedBinPackingNodeGroup) TargetSize() (int, error) {
+	return n.targetSize, nil
+}
+func (n *unsupportedBinPackingNodeGroup) IncreaseSize(delta int) error {
+	n.targetSize += delta
+	return nil
+}
+func (n *unsupportedBinPackingNodeGroup) AtomicIncreaseSize(delta int) error { return cloudprovider.ErrNotImplemented }
+func (n *unsupportedBinPackingNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
+	n.targetSize -= len(nodes)
+	return nil
+}
+func (n *unsupportedBinPackingNodeGroup) ForceDeleteNodes(nodes []*apiv1.Node) error { return n.DeleteNodes(nodes) }
+func (n *unsupportedBinPackingNodeGroup) DecreaseTargetSize(delta int) error {
+	n.targetSize += delta
+	return nil
+}
+func (n *unsupportedBinPackingNodeGroup) Id() string        { return n.id }
+func (n *unsupportedBinPackingNodeGroup) Debug() string     { return n.id }
+func (n *unsupportedBinPackingNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
+	return nil, nil
+}
+func (n *unsupportedBinPackingNodeGroup) TemplateNodeInfo() (*schedulerframework.NodeInfo, error) {
+	return nil, cloudprovider.ErrNotImplemented
+}
+func (n *unsupportedBinPackingNodeGroup) Exist() bool { return true }
+func (n *unsupportedBinPackingNodeGroup) Create() (cloudprovider.NodeGroup, error) {
+	return nil, cloudprovider.ErrNotImplemented
+}
+func (n *unsupportedBinPackingNodeGroup) Delete() error                 { return cloudprovider.ErrNotImplemented }
+func (n *unsupportedBinPackingNodeGroup) Autoprovisioned() bool         { return false }
+func (n *unsupportedBinPackingNodeGroup) GetOptions(config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
+	return nil, cloudprovider.ErrNotImplemented
+}
 
 func TestAddNodeToBucket(t *testing.T) {
 	provider := testprovider.NewTestCloudProvider(nil, nil)
@@ -300,5 +344,30 @@ func TestDeleteNodesFromCloudProviderBinPacking(t *testing.T) {
 				t.Errorf("unexpected target size: got %d, want %d", size, test.expectedSize)
 			}
 		})
+	}
+}
+
+func TestDeleteNodesFromCloudProviderBinPackingWithoutExtensionFails(t *testing.T) {
+	provider := testprovider.NewTestCloudProvider(
+		func(string, int) error { return nil },
+		func(string, string) error { return nil },
+	)
+	ctx, err := NewScaleTestAutoscalingContext(config.AutoscalingOptions{}, nil, nil, provider, nil, nil)
+	if err != nil {
+		t.Fatalf("Couldn't set up autoscaling context: %v", err)
+	}
+
+	ng := &unsupportedBinPackingNodeGroup{id: "unsupported-ng", targetSize: 1}
+	provider.InsertNodeGroup(ng)
+	node := generateNode("binpacking-node")
+	if node.Labels == nil {
+		node.Labels = map[string]string{}
+	}
+	node.Labels[scaledown.BinPackingLabelKey] = "true"
+	provider.AddNode(ng.id, node)
+
+	_, err = deleteNodesFromCloudProvider(&ctx, nodegroupchange.NewNodeGroupChangeObserversList(), []*apiv1.Node{node})
+	if err == nil {
+		t.Fatalf("expected bin-packing deletion to fail for node group without no-decrement extension")
 	}
 }

@@ -284,7 +284,7 @@ func (m *asgCache) decreaseAsgSizeByOneNoLock(asg *asg) error {
 }
 
 // DeleteInstances deletes the given instances. All instances must be controlled by the same ASG.
-func (m *asgCache) DeleteInstances(instances []*AwsInstanceRef) error {
+func (m *asgCache) DeleteInstances(instances []*AwsInstanceRef, shouldDecrementDesiredCapacity bool) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -367,7 +367,7 @@ func (m *asgCache) DeleteInstances(instances []*AwsInstanceRef) error {
 
 		params := &autoscaling.TerminateInstanceInAutoScalingGroupInput{
 			InstanceId:                     aws.String(instance.Name),
-			ShouldDecrementDesiredCapacity: aws.Bool(true),
+			ShouldDecrementDesiredCapacity: aws.Bool(shouldDecrementDesiredCapacity),
 		}
 		start := time.Now()
 		resp, err := m.awsService.TerminateInstanceInAutoScalingGroup(params)
@@ -377,8 +377,10 @@ func (m *asgCache) DeleteInstances(instances []*AwsInstanceRef) error {
 		}
 		klog.V(4).Infof(*resp.Activity.Description)
 
-		// Proactively decrement the size so autoscaler makes better decisions
-		commonAsg.curSize--
+		// Proactively decrement the size so autoscaler makes better decisions.
+		if shouldDecrementDesiredCapacity {
+			commonAsg.curSize--
+		}
 
 	}
 	return nil

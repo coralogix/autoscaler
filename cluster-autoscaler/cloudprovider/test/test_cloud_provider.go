@@ -453,6 +453,21 @@ func (tng *TestNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 	return nil
 }
 
+// DeleteNodesWithoutDecrement deletes nodes from this node group without
+// decrementing target size.
+func (tng *TestNodeGroup) DeleteNodesWithoutDecrement(nodes []*apiv1.Node) error {
+	tng.Lock()
+	id := tng.id
+	tng.Unlock()
+	for _, node := range nodes {
+		err := tng.cloudProvider.onScaleDown(id, node.Name)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ForceDeleteNodes deletes nodes from the group regardless of constraints.
 func (tng *TestNodeGroup) ForceDeleteNodes(nodes []*apiv1.Node) error {
 	return tng.DeleteNodes(nodes)
