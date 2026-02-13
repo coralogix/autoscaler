@@ -41,6 +41,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/options"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/utilization"
 	kube_util "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
+	pod_util "k8s.io/autoscaler/cluster-autoscaler/utils/pod"
 	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
 	. "k8s.io/autoscaler/cluster-autoscaler/utils/test"
 	"k8s.io/client-go/kubernetes/fake"
@@ -525,6 +526,9 @@ func TestUpdateClusterStateBinPackingEmptyNodeUnremovable(t *testing.T) {
 	nodes := []*apiv1.Node{
 		binPackingNode("bp1", 1000, 10),
 	}
+	pods := []*apiv1.Pod{
+		daemonSetPod("bp1-ds", "bp1"),
+	}
 	rsLister, err := kube_util.NewTestReplicaSetLister(generateReplicaSets("rs", 1))
 	assert.NoError(t, err)
 	registry := kube_util.NewListerRegistry(nil, nil, nil, nil, nil, nil, nil, rsLister, nil)
@@ -541,7 +545,7 @@ func TestUpdateClusterStateBinPackingEmptyNodeUnremovable(t *testing.T) {
 		MaxScaleDownParallelism:    10,
 	}, &fake.Clientset{}, registry, provider, nil, nil)
 	assert.NoError(t, err)
-	clustersnapshot.InitializeClusterSnapshotOrDie(t, context.ClusterSnapshot, nodes, nil)
+	clustersnapshot.InitializeClusterSnapshotOrDie(t, context.ClusterSnapshot, nodes, pods)
 	deleteOptions := options.NodeDeleteOptions{}
 	p := New(&context, NewTestProcessors(&context), deleteOptions, nil)
 	p.eligibilityChecker = &fakeEligibilityChecker{eligible: asMap(nodeNames(nodes))}
@@ -568,6 +572,7 @@ func TestBinPackingDestinationsFilteredToNonEmptyBinPackingNodes(t *testing.T) {
 	pods := []*apiv1.Pod{
 		SetRSPodSpec(BuildScheduledTestPod("p1", 500, 1, "bp-source"), "rs"),
 		SetRSPodSpec(BuildScheduledTestPod("p2", 500, 1, "bp-dest-nonempty"), "rs"),
+		annotatedDaemonSetPod("p3", "bp-dest-empty"),
 	}
 	rsLister, err := kube_util.NewTestReplicaSetLister(generateReplicaSets("rs", 2))
 	assert.NoError(t, err)
@@ -1028,6 +1033,21 @@ func binPackingNode(name string, cpu, memory int64) *apiv1.Node {
 	}
 	node.Labels[scaledown.BinPackingLabelKey] = "true"
 	return node
+}
+
+func daemonSetPod(name, nodeName string) *apiv1.Pod {
+	pod := BuildScheduledTestPod(name, 100, 1, nodeName)
+	pod.OwnerReferences = GenerateOwnerReferences("ds-"+name, "DaemonSet", "apps/v1", "")
+	return pod
+}
+
+func annotatedDaemonSetPod(name, nodeName string) *apiv1.Pod {
+	pod := BuildScheduledTestPod(name, 100, 1, nodeName)
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[pod_util.DaemonSetPodAnnotationKey] = "true"
+	return pod
 }
 
 func nodesByName(nodes []*apiv1.Node) map[string]*apiv1.Node {

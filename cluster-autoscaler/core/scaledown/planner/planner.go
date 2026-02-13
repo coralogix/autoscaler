@@ -262,11 +262,12 @@ func (p *Planner) injectPods(pods []*apiv1.Pod) error {
 }
 
 func (p *Planner) isNodeEmpty(nodeInfo *schedulerframework.NodeInfo) bool {
-	podsToRemove, _, _, err := simulator.GetPodsToMove(nodeInfo, p.deleteOptions, p.drainabilityRules, nil, nil, p.latestUpdate)
-	if err != nil {
-		return false
+	for _, podInfo := range nodeInfo.Pods {
+		if !pod_util.IsDaemonSetPod(podInfo.Pod) {
+			return false
+		}
 	}
-	return len(podsToRemove) == 0
+	return true
 }
 
 func (p *Planner) nonEmptyBinPackingDestinations(podDestinations map[string]bool) map[string]bool {
